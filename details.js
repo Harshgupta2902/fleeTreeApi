@@ -1,19 +1,8 @@
 const express = require("express");
-const fs = require("fs");
 const axios = require("axios");
 const cheerio = require("cheerio");
 
 const router = express.Router();
-
-function readLinksFromFile(file) {
-  try {
-    const data = fs.readFileSync(file, "utf8");
-    return data.split("\n").filter((link) => link.trim() !== "");
-  } catch (error) {
-    console.error(`Error reading file ${file}:`, error);
-    return [];
-  }
-}
 
 // Function to fetch data from a single link
 async function fetchData(link) {
@@ -27,22 +16,32 @@ async function fetchData(link) {
   }
 }
 
-// Function to extract data from HTML
 function extractDataFromHTML(html) {
   const $ = cheerio.load(html);
 
   try {
-    // Extract name from h1
     const h1Text = $(".title").text().trim();
     const packageNameVersion = h1Text.match(/^[^\d]*(\d+\.\d+\.\d+)/)[0];
-
-    // Extract metadata
     const metadataElement = $(".metadata");
     const publishedAgo = metadataElement.find(".-x-ago").text().trim();
     const publisher = metadataElement.find(".-pub-publisher").text().trim();
     const compatibility = metadataElement.find(".package-badge").text().trim();
-
-    // Extracting aside
+    const scoresElement = $(".packages-scores");
+    const likes = scoresElement
+      .find(".packages-score-like .packages-score-value-number")
+      .first()
+      .text()
+      .trim();
+    const pubPoints = scoresElement
+      .find(".packages-score-health .packages-score-value-number")
+      .first()
+      .text()
+      .trim();
+    const popularity = scoresElement
+      .find(".packages-score-popularity .packages-score-value-number")
+      .first()
+      .text()
+      .trim();
     const metadata = $("h3.title.pkg-infobox-metadata").next().text().trim();
     const topics = $("h3.title")
       .filter((index, element) => $(element).text().trim() === "Topics")
@@ -61,15 +60,39 @@ function extractDataFromHTML(html) {
           .map((index, element) => $(element).text().trim())
       ),
     ];
-
-    // Extract GitHub URL
+    const sdkTags = $(".detail-tags .-pub-tag-badge")
+      .filter(
+        (index, element) =>
+          $(element).find(".tag-badge-main").text().trim() === "SDK"
+      )
+      .find(".tag-badge-sub")
+      .map((index, element) => $(element).text().trim())
+      .get();
+    const platformTags = $(".detail-tags .-pub-tag-badge")
+      .filter(
+        (index, element) =>
+          $(element).find(".tag-badge-main").text().trim() === "Platform"
+      )
+      .find(".tag-badge-sub")
+      .map((index, element) => $(element).text().trim())
+      .get();
     const repositoryAnchor = $(".detail-info-box a").filter(function () {
       return $(this).text().trim() === "Repository (GitHub)";
     });
     const repositoryUrl = repositoryAnchor.attr("href");
-
+    const documentationLink = $("h3.title:contains('Documentation')")
+      .next()
+      .find("a.link")
+      .attr("href");
+    const licenseSection = $("h3.title:contains('License')").next();
+    const licenseText = licenseSection.text().trim();
+    const licenseName = licenseText.split("(")[0].trim();
+    const licenseLink = licenseSection.find("a").attr("href");
     return {
       packageNameVersion,
+      likes,
+      pubPoints,
+      popularity,
       publishedAgo,
       publisher,
       compatibility,
@@ -77,6 +100,11 @@ function extractDataFromHTML(html) {
       topics,
       dependencies,
       repositoryUrl,
+      sdkTags,
+      platformTags,
+      documentationLink,
+      licenseName,
+      licenseLink,
     };
   } catch (error) {
     console.error("Error extracting data:", error);
@@ -84,13 +112,93 @@ function extractDataFromHTML(html) {
   }
 }
 
+function extractScore(html) {
+  const $ = cheerio.load(html);
+  const scoresList = [];
+
+  $(".pkg-report-section").each((i, element) => {
+    const heading = $(element).find(".pkg-report-header-title").text().trim();
+    const granted = $(element)
+      .find(".pkg-report-header-score-granted")
+      .text()
+      .trim();
+    const max = $(element).find(".pkg-report-header-score-max").text().trim();
+
+    const score = {
+      heading: heading,
+      granted: parseInt(granted, 10),
+      max: parseInt(max, 10),
+    };
+
+    scoresList.push(score);
+  });
+
+  return scoresList;
+}
+
+function extractVersion(html) {
+  const $ = cheerio.load(html);
+  const versions = {
+    Stable: [],
+    Prerelease: [],
+  };
+
+  $("h2").each((i, headingElement) => {
+    const headingText = $(headingElement).text().trim();
+
+    if (headingText.includes("Stable versions")) {
+      currentCategory = "Stable";
+    } else if (headingText.includes("Prerelease versions")) {
+      currentCategory = "Prerelease";
+    } else {
+      return;
+    }
+
+    const table = $(headingElement).next("table");
+
+    table.find("tbody tr").each((j, rowElement) => {
+      const version = $(rowElement).find(".version a").text().trim();
+      const badge = $(rowElement).find(".badge .package-badge").text().trim();
+      const sdk = $(rowElement).find(".sdk").text().trim();
+      const uploaded = $(rowElement).find(".uploaded a").attr("title").trim();
+      const documentation =
+        $(rowElement).find(".documentation a").attr("href") || "";
+      const archive = $(rowElement).find(".archive a").attr("href") || "";
+
+      const versionDetail = {
+        version: version,
+        badge: badge,
+        sdk: sdk,
+        uploaded: uploaded,
+        documentation: documentation,
+        archive: archive,
+      };
+
+      // Add the extracted data to the appropriate category
+      versions[currentCategory].push(versionDetail);
+    });
+  });
+
+  // Remove empty categories if any
+  for (const category in versions) {
+    if (versions[category].length === 0) {
+      delete versions[category];
+    }
+  }
+
+  return versions;
+}
+
 async function fetchAndExtractData(link) {
   const html = await fetchData(link);
+  const scoreHtml = await fetchData(`${link}/score`);
+  const versionHtml = await fetchData(`${link}/versions`);
   if (html) {
     const data = extractDataFromHTML(html);
-    return data;
+    const score = extractScore(scoreHtml);
+    const versions = extractVersion(versionHtml);
+    return { data, score, versions };
   }
-  // return data;
 }
 
 router.get("/:package", async (req, res) => {
